@@ -1165,6 +1165,8 @@ dependencies = [
  "embassy-usb-logger",
  "log",
  "panic-probe",
+ "smart-leds",
+ "usbd-hid",
 ]
 
 [[package]]
@@ -1403,6 +1405,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
 dependencies = [
+ "defmt 0.3.100",
  "heapless",
  "portable-atomic",
 ]
@@ -1413,6 +1416,7 @@ version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6f291ab53d428685cc780f08a2eb9d5d6ff58622db2b36e239a4f715f1e184c"
 dependencies = [
+ "defmt 0.3.100",
  "serde",
  "ssmarshal",
  "usb-device",
