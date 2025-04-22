@@ -1,33 +1,36 @@
 #![no_std]
 #![no_main]
 
-use log::{log, trace, warn, error, info};
+#[allow(unused)]
+use log::{error, info, log, trace, warn};
 
-use core::sync::atomic::{Ordering, AtomicBool};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use embassy_futures::join::{join, join3, join_array};
 
 use embassy_executor::Spawner;
 
+use embassy_rp::bind_interrupts;
 use embassy_rp::block::ImageDef;
 use embassy_rp::clocks::ClockConfig;
 use embassy_rp::config::Config;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInt};
-use embassy_rp::bind_interrupts;
-//use embassy_rp::gpio::{Level, Output};
-use embassy_rp::pio::{Pio, InterruptHandler as PioInt};
-use embassy_rp::pio_programs::ws2812::*;
 use embassy_rp::peripherals::PIO0;
+use embassy_rp::pio::{InterruptHandler as PioInt, Pio};
+use embassy_rp::pio_programs::ws2812::*;
+use embassy_rp::gpio::Input;
 
 use embassy_usb::{
-    driver::Driver as UsbDriver,
-    {Config as UsbConfig, Handler, Builder},
-    class::hid::{ReportId, RequestHandler, State as HidState, HidReaderWriter},
+    class::hid::{HidReaderWriter, ReportId, RequestHandler, State as HidState},
+    class::cdc_acm::CdcAcmClass,
     control::OutResponse,
+    {Builder, Config as UsbConfig, Handler},
 };
 
 use embassy_time::Timer;
 
-use usbd_hid::descriptor::{ KeyboardReport, SerializedDescriptor};
+use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -37,8 +40,7 @@ use smart_leds::RGB8;
 async fn main(_spawner: Spawner) {
     // sparkfun pro micro rp2350 has a 12MHz crystal (just like the pico 2)
     let p = embassy_rp::init(Config::new(ClockConfig::crystal(12_000_000)));
-    let driver = Driver::new(p.USB, IrqsUsb); 
-    //spawner.must_spawn(logger_task(driver));
+    let driver = Driver::new(p.USB, IrqsUsb);
 
     let mut config = UsbConfig::new(0xc0de, 0xcafe);
     config.manufacturer = Some("me");
@@ -57,8 +59,10 @@ async fn main(_spawner: Spawner) {
     let mut control_buf = [0; 64];
     let mut recv_handler = RecvHandler {};
     let mut device_handler = DevHandler::new();
- 
+
     let mut state = HidState::new();
+
+    let mut status = embassy_usb::class::cdc_acm::State::new();
 
     let mut builder = Builder::new(
         driver,
@@ -66,19 +70,22 @@ async fn main(_spawner: Spawner) {
         &mut config_desc,
         &mut bos_desc,
         &mut msos_desc,
-        &mut control_buf
+        &mut control_buf,
     );
 
     builder.handler(&mut device_handler);
-    
+
     let config = embassy_usb::class::hid::Config {
         report_descriptor: KeyboardReport::desc(),
         request_handler: None,
         poll_ms: 60,
         max_packet_size: 64,
     };
-    
+
     let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut state, config);
+
+    //let serial = CdcAcmClass::new(&mut builder, &mut status, 64);
+    //spawner.must_spawn(logger_task(serial));
 
     let mut usb = builder.build();
 
@@ -86,31 +93,82 @@ async fn main(_spawner: Spawner) {
 
     let (reader, mut writer) = hid.split();
 
-    log::info!("Blinky example started");
+    //log::info!("Blinky example started");
 
-    let Pio { mut common, sm0, .. } = Pio::new(p.PIO0, IrqsPio);
+    let in_fut = async {
 
-    let mut data = [RGB8::new(0, 0, 0); 1];
+        let mut signal_pin = Input::new(p.PIN_29, embassy_rp::gpio::Pull::None);
+        signal_pin.set_schmitt(true);
 
-    let program = PioWs2812Program::new(&mut common);
-    let mut led = PioWs2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_25, &program);
+        loop {
+            info!("Waiting for HIGH on pin 16");
+            signal_pin.wait_for_high().await;
+            info!("HIGH DETECTED");
+            // Create a report with the A key pressed. (no shift modifier)
+            let report = KeyboardReport {
+                keycodes: [4, 0, 0, 0, 0, 0],
+                leds: 0,
+                modifier: 0,
+                reserved: 0,
+            };
+            // Send the report.
+            match writer.write_serialize(&report).await {
+                Ok(()) => {}
+                Err(e) => warn!("Failed to send report: {:?}", e),
+            };
+            signal_pin.wait_for_low().await;
+            info!("LOW DETECTED");
+            let report = KeyboardReport {
+                keycodes: [0, 0, 0, 0, 0, 0],
+                leds: 0,
+                modifier: 0,
+                reserved: 0,
+            };
+            match writer.write_serialize(&report).await {
+                Ok(()) => {}
+                Err(e) => warn!("Failed to send report: {:?}", e),
+            };
+        }
+    };
 
-    loop {
-        log::info!("LED ON");
-        data = data.map(|_| RGB8::new( 0x05, 0x05, 0x05 ));
-        led.write(&data).await;
-        Timer::after_millis(1000).await;
+    let out_fut = async {
+        reader.run(false, &mut recv_handler).await;
+    };
 
-        log::info!("LED OFF");
-        data = data.map(|_| RGB8::new( 0x00, 0x00, 0x00 ));
-        led.write(&data).await;
-        Timer::after_millis(1000).await;
-    }
+    /*let led = async {
+        let Pio {
+            mut common, sm0, ..
+        } = Pio::new(p.PIO0, IrqsPio);
+
+        let mut data = [RGB8::new(0, 0, 0); 1];
+
+        let program = PioWs2812Program::new(&mut common);
+        let mut led = PioWs2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_25, &program);
+
+        loop {
+            log::info!("LED ON");
+            data = data.map(|_| RGB8::new(0x05, 0x05, 0x05));
+            led.write(&data).await;
+            Timer::after_millis(1000).await;
+
+            log::info!("LED OFF");
+            data = data.map(|_| RGB8::new(0x00, 0x00, 0x00));
+            led.write(&data).await;
+            Timer::after_millis(1000).await;
+        }
+    };*/
+
+    /*let logger = async {
+        embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, serial).await;
+    };*/
+
+    //join_array([usb_fut, /*logger,*/ in_fut, out_fut, /*led*/]).await;
+    join3(usb_fut, in_fut, out_fut).await;
 }
 
 struct RecvHandler {}
 
-impl RequestHandler for RecvHandler  {
+impl RequestHandler for RecvHandler {
     fn get_report(&mut self, id: ReportId, _buf: &mut [u8]) -> Option<usize> {
         info!("Get report for {:?}", id);
         None
@@ -132,20 +190,21 @@ impl RequestHandler for RecvHandler  {
 }
 
 struct DevHandler {
-    configured: AtomicBool
+    configured: AtomicBool,
 }
 
 impl DevHandler {
     fn new() -> Self {
         DevHandler {
-            configured: AtomicBool::new(false)
+            configured: AtomicBool::new(false),
         }
     }
 }
 
 impl Handler for DevHandler {
     fn enabled(&mut self, enabled: bool) {
-        self.configured.store(false, core::sync::atomic::Ordering::Relaxed);
+        self.configured
+            .store(false, core::sync::atomic::Ordering::Relaxed);
         if enabled {
             info!("enabled");
         } else {
@@ -166,26 +225,20 @@ impl Handler for DevHandler {
     fn configured(&mut self, configured: bool) {
         self.configured.store(configured, Ordering::Relaxed);
         if configured {
-            info!("Device configured, it may now draw up to the configured current limit from Vbus.")
+            info!(
+                "Device configured, it may now draw up to the configured current limit from Vbus."
+            )
         } else {
             info!("Device is no longer configured, the Vbus current limit is 100mA.");
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
+/*
 #[embassy_executor::task]
-async fn logger_task(driver: Driver<'static, USB>) {
-    embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
+async fn logger_task(class: CdcAcmClass<'static, dyn UsbDriver<'static, USB>>) {
+    embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, class);
 }
+*/
 
 bind_interrupts!(struct IrqsUsb {
     USBCTRL_IRQ => UsbInt<USB>;
