@@ -1,13 +1,11 @@
-
 #![no_std]
 #![no_main]
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 //use defmt::*;
-use log::{info, warn};
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
+use embassy_futures::join::*;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::peripherals::USB;
@@ -16,8 +14,13 @@ use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config, Handler};
+use embassy_usb_logger::ReceiverHandler;
+use log::{info, warn};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 use {defmt_rtt as _, panic_probe as _};
+
+#[allow(unused, unsafe_op_in_unsafe_fn, unexpected_cfgs, non_upper_case_globals)]
+mod bootrom;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -122,18 +125,48 @@ async fn main(_spawner: Spawner) {
     };
 
     let out_fut = async {
-        reader.run(false, &mut request_handler).await;
+        reader.run(true, &mut request_handler).await;
     };
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join(usb_fut, join(join(in_fut, out_fut), embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial))).await;
+    join4(
+        usb_fut,
+        in_fut,
+        out_fut,
+        embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver),
+    )
+    .await;
 }
 
 //#[embassy_executor::task]
 //async fn logger(class: CdcAcmClass<>) {
 //    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, class).await;
 //}
+
+struct UsbReceiver {}
+
+impl ReceiverHandler for UsbReceiver {
+    fn new() -> Self {
+        UsbReceiver {}
+    }
+
+    async fn handle_data(&self, data: &[u8]) -> () {
+        info!("recevived: {:?}", data);
+        if data.contains(&98) {
+            info!("rebooting");
+            info!(
+                "returned: {}",
+                bootrom::reboot(
+                    0x0002, /* reboot to bootsel*/
+                    1,      /* 1 ms delay */
+                    0,      /* don't indicate a gpio because we don't use em */
+                    0       /* don't disable anything or mess with LED's */
+                )
+            );
+        }
+    }
+}
 
 struct MyRequestHandler {}
 
@@ -193,10 +226,11 @@ impl Handler for MyDeviceHandler {
     fn configured(&mut self, configured: bool) {
         self.configured.store(configured, Ordering::Relaxed);
         if configured {
-            info!("Device configured, it may now draw up to the configured current limit from Vbus.")
+            info!(
+                "Device configured, it may now draw up to the configured current limit from Vbus."
+            )
         } else {
             info!("Device is no longer configured, the Vbus current limit is 100mA.");
         }
     }
 }
-
