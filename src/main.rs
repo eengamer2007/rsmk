@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::join::*;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Input, Pull};
+use embassy_rp::gpio::{Flex, Input, Pin, Pull};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
@@ -19,12 +19,20 @@ use log::{info, warn};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 use {defmt_rtt as _, panic_probe as _};
 
-#[allow(unused, unsafe_op_in_unsafe_fn, unexpected_cfgs, non_upper_case_globals)]
+#[allow(
+    unused,
+    unsafe_op_in_unsafe_fn,
+    unexpected_cfgs,
+    non_upper_case_globals
+)]
 mod bootrom;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
+
+//const ROW_PINS: [u8; 5] = [19, 17, 9, 10, 11];
+//const COLUMN_PINS: [_; 6] = [p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN21];
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -83,45 +91,65 @@ async fn main(_spawner: Spawner) {
     // Run the USB device.
     let usb_fut = usb.run();
 
-    // Set up the signal pin that will be used to trigger the keyboard.
-    let mut signal_pin = Input::new(p.PIN_29, Pull::Up);
-
-    // Enable the schmitt trigger to slightly debounce.
-    signal_pin.set_schmitt(true);
-
     let (reader, mut writer) = hid.split();
 
     // Do stuff with the class!
     let in_fut = async {
-        loop {
-            info!("Waiting for LOW on pin 29 (A3)");
-            signal_pin.wait_for_low().await;
-            info!("LOW DETECTED");
-            // Create a report with the A key pressed. (no shift modifier)
-            let report = KeyboardReport {
-                keycodes: [4, 0, 0, 0, 0, 0],
-                leds: 0,
-                modifier: 0,
-                reserved: 0,
-            };
-            // Send the report.
-            match writer.write_serialize(&report).await {
-                Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
-            };
-            signal_pin.wait_for_high().await;
-            info!("HIGH DETECTED");
-            let report = KeyboardReport {
-                keycodes: [0, 0, 0, 0, 0, 0],
-                leds: 0,
-                modifier: 0,
-                reserved: 0,
-            };
-            match writer.write_serialize(&report).await {
-                Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
-            };
+        // Set up the signal pin that will be used to trigger the keyboard.
+        let mut r0 = Input::new(p.PIN_29, Pull::Up);
+
+        // Enable the schmitt trigger to slightly debounce.
+        r0.set_schmitt(true);
+
+        let mut row = [r0];
+ 
+        let column: &mut [Flex] = &mut [];
+        let pins: &mut [ &impl Pin ] = &mut [];
+        for pin in (p.PIN_9, p.PIN_26) {
+            let mut c = Flex::new(pin);
+            c.set_as_output();
+            c.set_low();
         }
+
+        let out = [[false; 1]; 1];
+
+        loop {
+            for pin in column.iter_mut() {
+                
+            }
+        }
+
+        /*
+                loop {
+                    info!("Waiting for LOW on pin 29 (A3)");
+                    r0.wait_for_low().await;
+                    info!("LOW DETECTED");
+                    // Create a report with the A key pressed. (no shift modifier)
+                    let report = KeyboardReport {
+                        keycodes: [4, 0, 0, 0, 0, 0],
+                        leds: 0,
+                        modifier: 0,
+                        reserved: 0,
+                    };
+                    // Send the report.
+                    match writer.write_serialize(&report).await {
+                        Ok(()) => {}
+                        Err(e) => warn!("Failed to send report: {:?}", e),
+                    };
+                    r0.wait_for_high().await;
+                    info!("HIGH DETECTED");
+                    let report = KeyboardReport {
+                        keycodes: [0, 0, 0, 0, 0, 0],
+                        leds: 0,
+                        modifier: 0,
+                        reserved: 0,
+                    };
+                    match writer.write_serialize(&report).await {
+                        Ok(()) => {}
+                        Err(e) => warn!("Failed to send report: {:?}", e),
+                    };
+                }
+        */
     };
 
     let out_fut = async {
@@ -135,6 +163,7 @@ async fn main(_spawner: Spawner) {
         in_fut,
         out_fut,
         embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver),
+        //key_scanner,
     )
     .await;
 }
