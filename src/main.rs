@@ -7,9 +7,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::join::*;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Flex, Input, Pin, Pull};
+use embassy_rp::gpio::{Flex, Input, Pull};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
@@ -96,60 +97,116 @@ async fn main(_spawner: Spawner) {
     // Do stuff with the class!
     let in_fut = async {
         // Set up the signal pin that will be used to trigger the keyboard.
-        let mut r0 = Input::new(p.PIN_29, Pull::Up);
+        //let mut r0 = Input::new(p.PIN_29, Pull::Up);
 
         // Enable the schmitt trigger to slightly debounce.
-        r0.set_schmitt(true);
+        //r0.set_schmitt(true);
 
-        let mut row = [r0];
- 
-        let column: &mut [Flex] = &mut [];
-        let pins: &mut [ &impl Pin ] = &mut [];
-        for pin in (p.PIN_9, p.PIN_26) {
-            let mut c = Flex::new(pin);
-            c.set_as_output();
-            c.set_low();
-        }
+        //let mut row = [r0];
 
-        let out = [[false; 1]; 1];
+        let mut columns = column_pins!(p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21);
+
+        //let column: &mut [Flex] = &mut [];
+        //let pins: &mut [ &impl Pin ] = &mut [];
+        columns.iter_mut().for_each(|x| {
+            x.set_low();
+            x.set_as_input();
+        });
+
+        //let mut rows = [Input::new(p.PIN_29, Pull::Up), Input::new(p.PIN_27, Pull::Up)];
+        let mut rows = row_pins!(p.PIN_29, p.PIN_27, p.PIN_6, p.PIN_7, p.PIN_8);
+        rows.iter_mut().for_each(|r| r.set_schmitt(true));
+
+        let mut out = [[false; 6]; 5];
+
+        #[rustfmt::skip]
+        let keymap: [[[Key; 6]; 5]; 2] = [
+            [
+                [Key::None,    Key::char('1'), Key::char('2'), Key::char('3'), Key::char('4'),               Key::char('5')],
+                [Key::TAB,     Key::char('q'), Key::char('w'), Key::char('e'), Key::char('r'),               Key::char('t')],
+                [Key::ESC,     Key::char('a'), Key::char('s'), Key::char('d'), Key::char('f'),               Key::char('g')],
+                [Key::L_SHIFT, Key::char('z'), Key::char('x'), Key::char('c'), Key::char('v'),               Key::char('b')],
+                [Key::None,    Key::None,      Key::None,      Key::None,      Key::Special(Special::Lower), Key::char(' ')],
+            ],
+            [
+                [Key::REBOOT, Key::None, Key::None, Key::None, Key::None,                    Key::None],
+                [Key::None,   Key::None, Key::None, Key::None, Key::None,                    Key::None],
+                [Key::None,   Key::None, Key::None, Key::None, Key::None,                    Key::None],
+                [Key::None,   Key::None, Key::None, Key::None, Key::None,                    Key::None],
+                [Key::None,   Key::None, Key::None, Key::None, Key::Special(Special::Lower), Key::None],
+            ]
+        ];
+
+        let specials: Option<(usize, usize, Special)> = keymap[0]
+            .iter()
+            .enumerate()
+            .map(|(x, r)| r.iter().enumerate().map(move |(y, v)| (x, y, v)))
+            .flatten()
+            .filter_map(|v|  { let (x,y, key) = v;  if let Key::Special(key) = key { Some((x,y, (*key).clone())) } else { None } })
+            .next();
+
+        info!("{:?}", specials);
 
         loop {
-            for pin in column.iter_mut() {
-                
-            }
-        }
-
-        /*
-                loop {
-                    info!("Waiting for LOW on pin 29 (A3)");
-                    r0.wait_for_low().await;
-                    info!("LOW DETECTED");
-                    // Create a report with the A key pressed. (no shift modifier)
-                    let report = KeyboardReport {
-                        keycodes: [4, 0, 0, 0, 0, 0],
-                        leds: 0,
-                        modifier: 0,
-                        reserved: 0,
-                    };
-                    // Send the report.
-                    match writer.write_serialize(&report).await {
-                        Ok(()) => {}
-                        Err(e) => warn!("Failed to send report: {:?}", e),
-                    };
-                    r0.wait_for_high().await;
-                    info!("HIGH DETECTED");
-                    let report = KeyboardReport {
-                        keycodes: [0, 0, 0, 0, 0, 0],
-                        leds: 0,
-                        modifier: 0,
-                        reserved: 0,
-                    };
-                    match writer.write_serialize(&report).await {
-                        Ok(()) => {}
-                        Err(e) => warn!("Failed to send report: {:?}", e),
-                    };
+            for (x, column) in columns.iter_mut().enumerate() {
+                core::hint::black_box(column.set_as_output());
+                for (y, row) in rows.iter().enumerate() {
+                    out[y][x] = row.is_low();
                 }
-        */
+                //column.set_as_input();
+                core::hint::black_box(column.set_as_input());
+            }
+
+            let mut special = 0;
+            if let Some((x,y,ref key)) = specials {
+                if out[x][y] == true {
+                    match key {
+                        Special::Lower => special = 1,
+                        //Special::Reboot => reboot(),
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut keycodes: [u8; 6] = [0; 6];
+            let mut idx = 0;
+            let mut modifier = 0;
+            for (x, r) in out.iter().enumerate() {
+                for (y, v) in r.iter().enumerate() {
+                    if *v {
+                        match keymap[special][x][y] {
+                            Key::Key(val) => {
+                                if idx < 6 {
+                                    keycodes[idx] = val;
+                                    idx += 1;
+                                } else {
+                                    keycodes = [0x1; 6];
+                                }
+                            }
+                            Key::Modifier(mod_key) => modifier = modifier | mod_key,
+                            Key::Special(s) => match s {
+                                Special::Reboot => reboot(),
+                                _ => {}
+                            },
+                            _ => info!("unknown key {},{}", x, y),
+                        }
+                    }
+                }
+            }
+            //info!("{:b}", modifier);
+            let report = KeyboardReport {
+                keycodes,
+                leds: 0,
+                modifier,
+                reserved: 0,
+            };
+            match writer.write_serialize(&report).await {
+                Ok(()) => {}
+                Err(e) => warn!("Failed to send report: {:?}", e),
+            };
+
+            Timer::after_micros(10).await;
+        }
     };
 
     let out_fut = async {
@@ -168,6 +225,90 @@ async fn main(_spawner: Spawner) {
     .await;
 }
 
+#[allow(dead_code)]
+#[derive(Clone)]
+enum Key {
+    Modifier(u8),
+    Key(u8),
+    Special(Special),
+    None,
+}
+
+#[allow(dead_code)]
+impl Key {
+    const L_CTRL: Self = Key::Modifier(1 << 0);
+    const L_SHIFT: Self = Key::Modifier(1 << 1);
+    const L_ALT: Self = Key::Modifier(1 << 2);
+    const L_SUPER: Self = Key::Modifier(1 << 3);
+    const R_CTRL: Self = Key::Modifier(1 << 4);
+    const R_SHIFT: Self = Key::Modifier(1 << 5);
+    const R_ALT: Self = Key::Modifier(1 << 6);
+    const R_SUPER: Self = Key::Modifier(1 << 7);
+
+    const REBOOT: Self = Key::Special(Special::Reboot);
+
+    const ESC: Self = Key::Key(0x29);
+    const TAB: Self = Key::Key(0x2B);
+
+    const fn char(c: char) -> Self {
+        let num = c as u8;
+
+        if num >= b'a' && num <= b'z' {
+            return Self::Key((num - b'a') + 4);
+        }
+
+        // ascii starts with 0
+        // but keycodes have 0 at the end
+        if c == '0' {
+            return Self::Key(39);
+        }
+
+        if num >= b'1' && num <= b'9' {
+            return Self::Key((num - b'1') + 30);
+        }
+
+        if c == ' ' {
+            return Key::Key(44);
+        }
+
+        Key::None
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Special {
+    Lower,
+    Upper,
+    Reboot,
+}
+
+#[macro_export]
+macro_rules! column_pins {
+    ($($x:expr), *) => {{
+        const SIZE: usize = count!($($x)*);
+        let out: [Flex; SIZE] = [$(Flex::new($x)),*];
+
+        out
+    }};
+}
+
+#[macro_export]
+macro_rules! row_pins {
+    ($($x:expr), *) => {{
+        const SIZE: usize = count!($($x)*);
+        let out: [Input; SIZE] = [$(Input::new($x, Pull::Up)),*];
+
+        out
+    }};
+}
+
+#[macro_export]
+macro_rules! count {
+    () => (0usize);
+    ( $x:tt $($xs:tt)* ) => (1usize + count!($($xs)*));
+}
+
 //#[embassy_executor::task]
 //async fn logger(class: CdcAcmClass<>) {
 //    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, class).await;
@@ -183,7 +324,13 @@ impl ReceiverHandler for UsbReceiver {
     async fn handle_data(&self, data: &[u8]) -> () {
         info!("recevived: {:?}", data);
         if data.contains(&98) {
-            info!("rebooting");
+            reboot();
+        }
+    }
+}
+
+fn reboot () {
+info!("rebooting");
             info!(
                 "returned: {}",
                 bootrom::reboot(
@@ -193,8 +340,6 @@ impl ReceiverHandler for UsbReceiver {
                     0       /* don't disable anything or mess with LED's */
                 )
             );
-        }
-    }
 }
 
 struct MyRequestHandler {}
