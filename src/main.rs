@@ -8,7 +8,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::*;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Flex, Input, Pull};
-use embassy_rp::peripherals::USB;
+use embassy_rp::peripherals::{I2C1, USB};
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::CdcAcmClass;
@@ -32,8 +32,9 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
-//const ROW_PINS: [u8; 5] = [19, 17, 9, 10, 11];
-//const COLUMN_PINS: [_; 6] = [p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN21];
+bind_interrupts!(struct I2CIrqs {
+    I2C1_IRQ => embassy_rp::i2c::InterruptHandler<I2C1>;
+});
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -96,44 +97,47 @@ async fn main(_spawner: Spawner) {
 
     // Do stuff with the class!
     let in_fut = async {
-        // Set up the signal pin that will be used to trigger the keyboard.
-        //let mut r0 = Input::new(p.PIN_29, Pull::Up);
-
-        // Enable the schmitt trigger to slightly debounce.
-        //r0.set_schmitt(true);
-
-        //let mut row = [r0];
-
         let mut columns = column_pins!(p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21);
 
-        //let column: &mut [Flex] = &mut [];
-        //let pins: &mut [ &impl Pin ] = &mut [];
         columns.iter_mut().for_each(|x| {
             x.set_low();
             x.set_as_input();
         });
 
-        //let mut rows = [Input::new(p.PIN_29, Pull::Up), Input::new(p.PIN_27, Pull::Up)];
         let mut rows = row_pins!(p.PIN_29, p.PIN_27, p.PIN_6, p.PIN_7, p.PIN_8);
         rows.iter_mut().for_each(|r| r.set_schmitt(true));
 
         let mut out = [[false; 6]; 5];
 
         #[rustfmt::skip]
-        let keymap: [[[Key; 6]; 5]; 2] = [
-            [
+        let keymap: [[[Key; 6]; 5]; 4] = [
+            [ // BASE
                 [Key::None,    Key::char('1'), Key::char('2'), Key::char('3'), Key::char('4'),               Key::char('5')],
                 [Key::TAB,     Key::char('q'), Key::char('w'), Key::char('e'), Key::char('r'),               Key::char('t')],
                 [Key::ESC,     Key::char('a'), Key::char('s'), Key::char('d'), Key::char('f'),               Key::char('g')],
                 [Key::L_SHIFT, Key::char('z'), Key::char('x'), Key::char('c'), Key::char('v'),               Key::char('b')],
-                [Key::None,    Key::None,      Key::None,      Key::None,      Key::Special(Special::Lower), Key::char(' ')],
+                [Key::None,    Key::MUTE,      Key::L_CTRL,    Key::L_SUPER,   Key::Special(Special::Lower), Key::char(' ')],
             ],
-            [
-                [Key::REBOOT, Key::None, Key::None, Key::None, Key::None,                    Key::None],
-                [Key::None,   Key::None, Key::None, Key::None, Key::None,                    Key::None],
-                [Key::None,   Key::None, Key::None, Key::None, Key::None,                    Key::None],
-                [Key::None,   Key::None, Key::None, Key::None, Key::None,                    Key::None],
-                [Key::None,   Key::None, Key::None, Key::None, Key::Special(Special::Lower), Key::None],
+            [ // LOWER
+                [Key::REBOOT, Key::f(1), Key::f(2),  Key::f(3),  Key::f(4),                    Key::None],
+                [Key::None,   Key::f(5), Key::f(6),  Key::f(7),  Key::f(8),                    Key::None],
+                [Key::None,   Key::f(9), Key::f(10), Key::f(11), Key::f(12),                   Key::None],
+                [Key::None,   Key::None, Key::None,  Key::None,  Key::None,                    Key::None],
+                [Key::None,   Key::None, Key::None,  Key::None,  Key::Special(Special::Lower), Key::None],
+            ],
+            [ // UPPER
+                [Key::REBOOT, Key::f(1), Key::f(2),  Key::f(3),  Key::f(4),                    Key::None],
+                [Key::None,   Key::f(5), Key::f(6),  Key::f(7),  Key::f(8),                    Key::None],
+                [Key::None,   Key::f(9), Key::f(10), Key::f(11), Key::f(12),                   Key::None],
+                [Key::None,   Key::None, Key::None,  Key::None,  Key::None,                    Key::None],
+                [Key::None,   Key::None, Key::None,  Key::None,  Key::Special(Special::Lower), Key::None],
+            ],
+            [ // BOTH
+                [Key::REBOOT, Key::f(1), Key::f(2),  Key::f(3),  Key::f(4),                    Key::None],
+                [Key::None,   Key::f(5), Key::f(6),  Key::f(7),  Key::f(8),                    Key::None],
+                [Key::None,   Key::f(9), Key::f(10), Key::f(11), Key::f(12),                   Key::None],
+                [Key::None,   Key::None, Key::None,  Key::None,  Key::None,                    Key::None],
+                [Key::None,   Key::None, Key::None,  Key::None,  Key::Special(Special::Lower), Key::None],
             ]
         ];
 
@@ -142,27 +146,39 @@ async fn main(_spawner: Spawner) {
             .enumerate()
             .map(|(x, r)| r.iter().enumerate().map(move |(y, v)| (x, y, v)))
             .flatten()
-            .filter_map(|v|  { let (x,y, key) = v;  if let Key::Special(key) = key { Some((x,y, (*key).clone())) } else { None } })
+            .filter_map(|v| {
+                let (x, y, key) = v;
+                if let Key::Special(key) = key {
+                    Some((x, y, (*key).clone()))
+                } else {
+                    None
+                }
+            })
             .next();
 
         info!("{:?}", specials);
+
+        let mut old_report = KeyboardReport::default();
 
         loop {
             for (x, column) in columns.iter_mut().enumerate() {
                 core::hint::black_box(column.set_as_output());
                 for (y, row) in rows.iter().enumerate() {
                     out[y][x] = row.is_low();
+                    if row.is_low() {
+                        info!("trigger: {},{}", x, y);
+                    }
                 }
                 //column.set_as_input();
                 core::hint::black_box(column.set_as_input());
             }
 
             let mut special = 0;
-            if let Some((x,y,ref key)) = specials {
+            if let Some((x, y, ref key)) = specials {
                 if out[x][y] == true {
                     match key {
-                        Special::Lower => special = 1,
-                        //Special::Reboot => reboot(),
+                        Special::Lower => special |= 1 >> 0,
+                        Special::Upper => special |= 1 >> 1,
                         _ => {}
                     }
                 }
@@ -185,7 +201,7 @@ async fn main(_spawner: Spawner) {
                             }
                             Key::Modifier(mod_key) => modifier = modifier | mod_key,
                             Key::Special(s) => match s {
-                                Special::Reboot => reboot(),
+                                Special::Reboot => reboot().await,
                                 _ => {}
                             },
                             _ => info!("unknown key {},{}", x, y),
@@ -200,12 +216,16 @@ async fn main(_spawner: Spawner) {
                 modifier,
                 reserved: 0,
             };
-            match writer.write_serialize(&report).await {
-                Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
-            };
+            if report != old_report {
+                writer.write()
+                match writer.write_serialize(&report).await {
+                    Ok(()) => {}
+                    Err(e) => warn!("Failed to send report: {:?}", e),
+                };
+                old_report = report;
+            }
 
-            Timer::after_micros(10).await;
+            embassy_futures::yield_now().await;
         }
     };
 
@@ -213,16 +233,100 @@ async fn main(_spawner: Spawner) {
         reader.run(true, &mut request_handler).await;
     };
 
+    let i2c = async {
+        let config = embassy_rp::i2c::Config::default();
+        let mut i2c =
+            embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_3, p.PIN_2, /*I2CIrqs,*/ config);
+
+        //let data: &mut [u8] = &mut [0; 32];
+
+        //info!("{:?}\n", data);
+        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
+        //info!("{:?}\n", data);
+        //info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xAF]));
+        
+        /*let data: [&[u8]; 16] = [
+            &[0xAE], // disable
+            &[0x04], // lower column addressing
+            &[0x10], // higher column addressing
+            &[0x40], // display start line
+            &[0x81, 0x80], // contrast
+            &[0xA1], // segment remap
+            &[0xA6], // normal display
+            &[0xA8, 0x1F], // mux ratio
+            &[0xC8], //  com direction scan output
+            &[0xD3, 0x00], // display offset
+            &[0xD5, 0xF0], // clock div and freq
+            &[0xD8, 0x05], // ?
+            &[0xD9, 0xC2], // pre charge period
+            &[0xDA, 0x12], // com pin hw config
+            &[0xDB, 0x08], // v_comh deselect
+            &[0xAF], // enable
+        ];*/
+
+        /*for b in data {
+            write_cmd(&mut i2c, b);
+            Timer::after_secs(1).await;
+        }*/
+
+        //write_cmd(&mut i2c, &[0xAE, 0x04, 0x10, 0x40, 0x81, 0x80, 0xA1, 0xA6, 0xA8, 0x1F, 0xC8, 0xD3, 0x00, 0xD5, 0xF0, 0xD8, 0x05, 0xD9, 0xC2, 0xDA, 0x12, 0xDB, 0x08, 0xAF]);
+
+        //write_cmd(&mut i2c, 0xA);
+        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
+        //info!("{:?}\n", data);
+
+        //let data: &mut [u8] = &mut [0; 32];
+        //Timer::after_secs(1).await;
+        //info!("{:?}", i2c.write_async(0x3Cu16, [1 << 7, 0x81, 1 << 7, 0xFF]).await);
+        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
+        //info!("{:?}\n", data);
+
+        //Timer::after_secs(1).await;
+
+        write_cmd(&mut i2c, &[0xAE]);
+        //let data: &mut [u8] = &mut [0; 32];
+        
+        write_cmd(&mut i2c, &[0x81, 0xFF]);
+
+        info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA5]));
+
+        Timer::after_secs(1).await;
+        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
+        //info!("{:?}\n", data);
+
+        //Timer::after_secs(1).await;
+
+        //let data: &mut [u8] = &mut [0; 32];
+        info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA6]));
+
+        Timer::after_secs(1).await;
+        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
+        //info!("{:?}\n", data);
+        write_cmd(&mut i2c, &[0xAF]);
+    };
+
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join4(
+    join5(
         usb_fut,
         in_fut,
         out_fut,
         embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver),
-        //key_scanner,
+        i2c,
     )
     .await;
+}
+
+fn write_cmd(i2c: &mut embassy_rp::i2c::I2c<I2C1, embassy_rp::i2c::Blocking>, byte: &[u8]) {
+
+    let out = &mut [0; 512];
+
+    byte.iter().enumerate().for_each(|(i, val)| {
+        out[i * 2] = 1 << 7;
+        out[i * 2 + 1] = *val;
+    });
+
+    info!("{:?}", i2c.blocking_write(0x3Cu8, &out[0..(byte.len() * 2)]));
 }
 
 #[allow(dead_code)]
@@ -249,6 +353,7 @@ impl Key {
 
     const ESC: Self = Key::Key(0x29);
     const TAB: Self = Key::Key(0x2B);
+    const MUTE: Self = Key::Key(0x7F);
 
     const fn char(c: char) -> Self {
         let num = c as u8;
@@ -272,6 +377,16 @@ impl Key {
         }
 
         Key::None
+    }
+
+    const fn f(num: u8) -> Key {
+        debug_assert!(num <= 24);
+        debug_assert!(num > 0);
+
+        if num <= 12 {
+            return Key::Key(num - 1 + 58);
+        }
+        Key::Key(num - 13 + 104)
     }
 }
 
@@ -309,11 +424,6 @@ macro_rules! count {
     ( $x:tt $($xs:tt)* ) => (1usize + count!($($xs)*));
 }
 
-//#[embassy_executor::task]
-//async fn logger(class: CdcAcmClass<>) {
-//    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, class).await;
-//}
-
 struct UsbReceiver {}
 
 impl ReceiverHandler for UsbReceiver {
@@ -324,22 +434,22 @@ impl ReceiverHandler for UsbReceiver {
     async fn handle_data(&self, data: &[u8]) -> () {
         info!("recevived: {:?}", data);
         if data.contains(&98) {
-            reboot();
+            reboot().await;
         }
     }
 }
 
-fn reboot () {
-info!("rebooting");
-            info!(
-                "returned: {}",
-                bootrom::reboot(
-                    0x0002, /* reboot to bootsel*/
-                    1,      /* 1 ms delay */
-                    0,      /* don't indicate a gpio because we don't use em */
-                    0       /* don't disable anything or mess with LED's */
-                )
-            );
+async fn reboot() {
+    info!("rebooting");
+    info!(
+        "returned: {}",
+        bootrom::reboot(
+            0x0002, /* reboot to bootsel*/
+            1,      /* 1 ms delay */
+            0,      /* don't indicate a gpio because we don't use em */
+            0       /* don't disable anything or mess with LED's */
+        )
+    );
 }
 
 struct MyRequestHandler {}

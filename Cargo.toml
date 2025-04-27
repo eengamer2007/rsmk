@@ -31,4 +31,5 @@ embassy-usb-logger = "0.4.0"
 log = "0.4.27"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 smart-leds = "0.4.0"
+spin = "0.10.0"
 usbd-hid = { version = "0.8.2", features = ["defmt"] }
