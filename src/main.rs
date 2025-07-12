@@ -4,12 +4,13 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+use display::SSD1306;
 //use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::*;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Flex, Input, Pull};
-use embassy_rp::peripherals::{I2C1, PIO0, PIO1, USB};
+use embassy_rp::peripherals::{I2C1, PIN_2, PIN_3, PIO0, PIO1, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
@@ -33,6 +34,8 @@ use {defmt_rtt as _, panic_probe as _};
 )]
 mod bootrom;
 
+mod display;
+
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
@@ -52,7 +55,7 @@ bind_interrupts!(struct Pio1Irqs {
 const LED_COUNT: usize = 29;
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USB, Irqs);
@@ -280,10 +283,12 @@ async fn main(_spawner: Spawner) {
         reader.run(true, &mut request_handler).await;
     };
 
-    let i2c = async {
-        let config = embassy_rp::i2c::Config::default();
-        let mut i2c =
-            embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_3, p.PIN_2, /*I2CIrqs,*/ config);
+    /*let i2c = async move || {
+        //let config = embassy_rp::i2c::Config::default();
+        //let mut i2c =
+        //    embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_3, p.PIN_2, /*I2CIrqs,*/ config);
+
+        let display = SSD1306::new();
 
         //let data: &mut [u8] = &mut [0; 32];
 
@@ -330,27 +335,27 @@ async fn main(_spawner: Spawner) {
 
         //Timer::after_secs(1).await;
 
-        write_cmd(&mut i2c, &[0xAE]);
+        //write_cmd(&mut i2c, &[0xAE]);
         //let data: &mut [u8] = &mut [0; 32];
 
-        write_cmd(&mut i2c, &[0x81, 0xFF]);
+        //write_cmd(&mut i2c, &[0x81, 0xFF]);
 
-        info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA5]));
+        //info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA5]));
 
-        Timer::after_secs(1).await;
+        //Timer::after_secs(1).await;
         //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
         //info!("{:?}\n", data);
 
         //Timer::after_secs(1).await;
 
         //let data: &mut [u8] = &mut [0; 32];
-        info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA6]));
+        //info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA6]));
 
-        Timer::after_secs(1).await;
+        //Timer::after_secs(1).await;
         //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
         //info!("{:?}\n", data);
-        write_cmd(&mut i2c, &[0xAF]);
-    };
+        //write_cmd(&mut i2c, &[0xAF]);
+    };*/
 
     let encoder = async {
         let Pio {
@@ -428,16 +433,22 @@ async fn main(_spawner: Spawner) {
         }
     };
 
+    spawner.spawn(display(p.I2C1, p.PIN_2, p.PIN_3)).unwrap();
+
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join5(
+    join4(
         usb_fut,
         join(in_fut, out_fut),
         embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver),
-        i2c,
         join(encoder, rgb),
     )
     .await;
+}
+
+#[embassy_executor::task]
+async fn display(i2c1: I2C1, p2: PIN_2, p3: PIN_3) {
+    let display = SSD1306::new(i2c1, p2, p3);
 }
 
 fn color(idx: usize, phase: f32, time: f32) -> u8 {
@@ -447,7 +458,7 @@ fn color(idx: usize, phase: f32, time: f32) -> u8 {
     (((unsafe { sinf32((phase * (2. / 3.) * PI) + time + ((idx as f32 / LED_COUNT as f32) * 2. * PI)) } + 1.) / 2.) * 255.) as u8
 }
 
-fn write_cmd(i2c: &mut embassy_rp::i2c::I2c<I2C1, embassy_rp::i2c::Blocking>, byte: &[u8]) {
+/*fn write_cmd(i2c: &mut embassy_rp::i2c::I2c<I2C1, embassy_rp::i2c::Blocking>, byte: &[u8]) {
     let out = &mut [0; 512];
 
     byte.iter().enumerate().for_each(|(i, val)| {
@@ -459,7 +470,7 @@ fn write_cmd(i2c: &mut embassy_rp::i2c::I2c<I2C1, embassy_rp::i2c::Blocking>, by
         "{:?}",
         i2c.blocking_write(0x3Cu8, &out[0..(byte.len() * 2)])
     );
-}
+}*/
 
 #[allow(dead_code)]
 #[derive(Clone)]
