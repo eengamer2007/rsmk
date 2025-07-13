@@ -1,30 +1,44 @@
 #![no_std]
 #![no_main]
+#![allow(internal_features, static_mut_refs)]
 #![feature(core_intrinsics)]
 
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use display::SSD1306;
-//use defmt::*;
+use cortex_m::asm::delay;
+
 use embassy_executor::Spawner;
+
 use embassy_futures::join::*;
-use embassy_rp::bind_interrupts;
+
 use embassy_rp::gpio::{Flex, Input, Pull};
-use embassy_rp::peripherals::{I2C1, PIN_2, PIN_3, PIO0, PIO1, USB};
+use embassy_rp::i2c::{SclPin, SdaPin};
+use embassy_rp::multicore::{Stack, spawn_core1};
+use embassy_rp::peripherals::{I2C1, PIO0, PIO1, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
-use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver, InterruptHandler};
-use embassy_time::{Instant, Timer};
+use embassy_rp::{Peri, bind_interrupts};
+
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config, Handler};
+
 use embassy_usb_logger::ReceiverHandler;
+
 use log::{info, warn};
-use smart_leds::RGB8;
+
+use rgb::{rgb_runner, rgb_setup};
+
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
-use {defmt_rtt as _, panic_probe as _};
+
+use defmt_rtt as _;
+
+use panic_probe as _;
 
 #[allow(
     unused,
@@ -35,6 +49,9 @@ use {defmt_rtt as _, panic_probe as _};
 mod bootrom;
 
 mod display;
+use display::SSD1306;
+
+mod rgb;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -54,9 +71,23 @@ bind_interrupts!(struct Pio1Irqs {
 
 const LED_COUNT: usize = 29;
 
+static mut CORE1_STACK: Stack<4096> = Stack::new();
+
+static RGB_STATE: Signal<CriticalSectionRawMutex, rgb::RgbState> = Signal::new();
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(p.PIO1, crate::Pio1Irqs);
+
+    RGB_STATE.signal(rgb::RgbState::Reset);
+
+    let led = rgb_setup(&mut common, sm0, p.DMA_CH0, p.PIN_0);
+    spawner.spawn(rgb_runner(led)).unwrap();
+
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USB, Irqs);
 
@@ -70,29 +101,29 @@ async fn main(spawner: Spawner) {
 
     // Create embassy-usb DeviceBuilder using the driver and config.
     // It needs some buffers for building the descriptors.
-    let mut config_descriptor = [0; 256];
-    let mut bos_descriptor = [0; 256];
+    static mut config_descriptor: [u8; 256] = [0; 256];
+    static mut bos_descriptor: [u8; 256] = [0; 256];
     // You can also add a Microsoft OS descriptor.
-    let mut msos_descriptor = [0; 256];
-    let mut control_buf = [0; 64];
+    static mut msos_descriptor: [u8; 256] = [0; 256];
+    static mut control_buf: [u8; 64] = [0; 64];
     let mut request_handler = MyRequestHandler {};
-    let mut device_handler = MyDeviceHandler::new();
+    static mut device_handler: MyDeviceHandler = MyDeviceHandler::new();
 
     // needs to be made before the builder
-    let mut state = State::new();
+    static mut state: State = State::new();
 
-    let mut s_state = embassy_usb::class::cdc_acm::State::new();
+    static mut s_state: embassy_usb::class::cdc_acm::State = embassy_usb::class::cdc_acm::State::new();
 
     let mut builder = Builder::new(
         driver,
         config,
-        &mut config_descriptor,
-        &mut bos_descriptor,
-        &mut msos_descriptor,
-        &mut control_buf,
+        unsafe { &mut config_descriptor },
+        unsafe { &mut bos_descriptor },
+        unsafe { &mut msos_descriptor },
+        unsafe { &mut control_buf },
     );
 
-    builder.handler(&mut device_handler);
+    builder.handler(unsafe { &mut device_handler } );
 
     // Create classes on the builder.
     let config = embassy_usb::class::hid::Config {
@@ -101,9 +132,9 @@ async fn main(spawner: Spawner) {
         poll_ms: 60,
         max_packet_size: 64,
     };
-    let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut state, config);
-    let serial = CdcAcmClass::new(&mut builder, &mut s_state, 64);
-    //spawner.must_spawn(logger);
+    let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, unsafe { &mut state }, config);
+    let serial = CdcAcmClass::new(&mut builder, unsafe { &mut s_state }, 64);
+    spawner.spawn(logger(serial)).unwrap();
 
     // Build the builder.
     let mut usb = builder.build();
@@ -192,16 +223,21 @@ async fn main(spawner: Spawner) {
 
         loop {
             for (x, column) in columns.iter_mut().enumerate() {
-                core::hint::black_box(column.set_as_output());
+                column.set_as_output();
+                delay(100);
                 for (y, row) in rows.iter().enumerate() {
-                    out[y][x] = row.is_low();
-                    if row.is_low() {
+                    let low = row.is_low();
+                    delay(100);
+                    out[y][x] = low;
+                    if low {
                         info!("trigger: {},{}", x, y);
                     }
                 }
                 //column.set_as_input();
-                core::hint::black_box(column.set_as_input());
+                column.set_as_input();
+                delay(50);
             }
+            RGB_STATE.signal(rgb::RgbState::Start);
 
             let mut special = 0;
             if let Some((x, y, ref key)) = specials {
@@ -283,80 +319,6 @@ async fn main(spawner: Spawner) {
         reader.run(true, &mut request_handler).await;
     };
 
-    /*let i2c = async move || {
-        //let config = embassy_rp::i2c::Config::default();
-        //let mut i2c =
-        //    embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_3, p.PIN_2, /*I2CIrqs,*/ config);
-
-        let display = SSD1306::new();
-
-        //let data: &mut [u8] = &mut [0; 32];
-
-        //info!("{:?}\n", data);
-        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
-        //info!("{:?}\n", data);
-        //info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xAF]));
-
-        /*let data: [&[u8]; 16] = [
-            &[0xAE], // disable
-            &[0x04], // lower column addressing
-            &[0x10], // higher column addressing
-            &[0x40], // display start line
-            &[0x81, 0x80], // contrast
-            &[0xA1], // segment remap
-            &[0xA6], // normal display
-            &[0xA8, 0x1F], // mux ratio
-            &[0xC8], //  com direction scan output
-            &[0xD3, 0x00], // display offset
-            &[0xD5, 0xF0], // clock div and freq
-            &[0xD8, 0x05], // ?
-            &[0xD9, 0xC2], // pre charge period
-            &[0xDA, 0x12], // com pin hw config
-            &[0xDB, 0x08], // v_comh deselect
-            &[0xAF], // enable
-        ];*/
-
-        /*for b in data {
-            write_cmd(&mut i2c, b);
-            Timer::after_secs(1).await;
-        }*/
-
-        //write_cmd(&mut i2c, &[0xAE, 0x04, 0x10, 0x40, 0x81, 0x80, 0xA1, 0xA6, 0xA8, 0x1F, 0xC8, 0xD3, 0x00, 0xD5, 0xF0, 0xD8, 0x05, 0xD9, 0xC2, 0xDA, 0x12, 0xDB, 0x08, 0xAF]);
-
-        //write_cmd(&mut i2c, 0xA);
-        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
-        //info!("{:?}\n", data);
-
-        //let data: &mut [u8] = &mut [0; 32];
-        //Timer::after_secs(1).await;
-        //info!("{:?}", i2c.write_async(0x3Cu16, [1 << 7, 0x81, 1 << 7, 0xFF]).await);
-        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
-        //info!("{:?}\n", data);
-
-        //Timer::after_secs(1).await;
-
-        //write_cmd(&mut i2c, &[0xAE]);
-        //let data: &mut [u8] = &mut [0; 32];
-
-        //write_cmd(&mut i2c, &[0x81, 0xFF]);
-
-        //info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA5]));
-
-        //Timer::after_secs(1).await;
-        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
-        //info!("{:?}\n", data);
-
-        //Timer::after_secs(1).await;
-
-        //let data: &mut [u8] = &mut [0; 32];
-        //info!("{:?}", i2c.blocking_write(0x3Cu16, &[1 << 7, 0xA6]));
-
-        //Timer::after_secs(1).await;
-        //info!("{:?}", i2c.read_async(0x3Cu16, data).await);
-        //info!("{:?}\n", data);
-        //write_cmd(&mut i2c, &[0xAF]);
-    };*/
-
     let encoder = async {
         let Pio {
             mut common, sm0, ..
@@ -393,84 +355,45 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    let rgb = async {
-        let mut buf = [RGB8::new(255, 0, 0); LED_COUNT];
-
-        for i in 0..LED_COUNT {
-            use core::f32::consts::PI;
-            use core::intrinsics::sinf32;
-            unsafe {
-                buf[i] = RGB8::new(
-                    (sinf32(i as f32 + 0. * ((2. / 3.) * PI) + Instant::now().as_micros() as f32)
-                        * 255.) as u8,
-                    (sinf32(i as f32 + 1. * ((2. / 3.) * PI) + Instant::now().as_micros() as f32)
-                        * 255.) as u8,
-                    (sinf32(i as f32 + 2. * ((2. / 3.) * PI) + Instant::now().as_micros() as f32)
-                        * 255.) as u8,
-                )
-            };
-        }
-
-        let Pio {
-            mut common, sm0, ..
-        } = Pio::new(p.PIO1, Pio1Irqs);
-
-        let prg = PioWs2812Program::new(&mut common);
-        let mut led = PioWs2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_0, &prg);
-
-        loop {
-            // amount of seconds
-            let mut time = Instant::now().as_micros() as f32 / 1000000.;
-            time *= 1.5;
-            time = -time;
-            for i in 0..LED_COUNT {
-                buf[i] = RGB8::new(color(i, 0., time), color(i, 1., time), color(i, 2., time))
-            }
-
-            //buf = buf.map(|v| RGB8::new(v.g, v.b, v.r));
-            led.write(&buf).await;
-            Timer::after_millis(5).await;
-        }
-    };
-
-    spawner.spawn(display(p.I2C1, p.PIN_2, p.PIN_3)).unwrap();
+    ////spawn_core1(
+    //    p.CORE1,
+    //    unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+    //    move || {
+    //        display(p.I2C1, p.PIN_2, p.PIN_3);
+    //        loop {
+    //            wfi();
+    //        }
+    //    },
+    //);
+    //spawner.spawn(display(p.I2C1, p.PIN_2, p.PIN_3)).unwrap();
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join4(
-        usb_fut,
-        join(in_fut, out_fut),
-        embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver),
-        join(encoder, rgb),
-    )
-    .await;
+    join3(usb_fut, join(in_fut, out_fut), encoder).await;
+    //embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
 }
 
 #[embassy_executor::task]
-async fn display(i2c1: I2C1, p2: PIN_2, p3: PIN_3) {
-    let display = SSD1306::new(i2c1, p2, p3);
+async fn logger(serial: CdcAcmClass<'static, Driver<'static, USB>>) {
+    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
 }
 
-fn color(idx: usize, phase: f32, time: f32) -> u8 {
-    use core::f32::consts::PI;
-    use core::intrinsics::sinf32;
-
-    (((unsafe { sinf32((phase * (2. / 3.) * PI) + time + ((idx as f32 / LED_COUNT as f32) * 2. * PI)) } + 1.) / 2.) * 255.) as u8
+//#[embassy_executor::task]
+/*async*/
+fn display(i2c1: Peri<'static, I2C1>, p2: Peri<'static, impl SdaPin<I2C1>>, p3: Peri<'static, impl SclPin<I2C1>>) {
+    let mut display: SSD1306<'_, { display::required_buf_size(128, 32) }> =
+        SSD1306::new(i2c1, p2, p3);
+    display.begin();
+    display.test();
+    //display.display();
+    //for x in 0..32 {
+    //    //for y in 0..4 {
+    //        display.toggle_pixel(x, x);
+    //    //}
+    //    display.display();
+    //}
+    //display.display();
 }
-
-/*fn write_cmd(i2c: &mut embassy_rp::i2c::I2c<I2C1, embassy_rp::i2c::Blocking>, byte: &[u8]) {
-    let out = &mut [0; 512];
-
-    byte.iter().enumerate().for_each(|(i, val)| {
-        out[i * 2] = 1 << 7;
-        out[i * 2 + 1] = *val;
-    });
-
-    info!(
-        "{:?}",
-        i2c.blocking_write(0x3Cu8, &out[0..(byte.len() * 2)])
-    );
-}*/
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -585,6 +508,7 @@ impl ReceiverHandler for UsbReceiver {
 }
 
 async fn reboot() {
+    //RGB_STATE.signal(RgbState::Reset);
     info!("rebooting");
     info!(
         "returned: {}",
@@ -625,7 +549,7 @@ struct MyDeviceHandler {
 }
 
 impl MyDeviceHandler {
-    fn new() -> Self {
+    const fn new() -> Self {
         MyDeviceHandler {
             configured: AtomicBool::new(false),
         }
