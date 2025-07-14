@@ -1,6 +1,8 @@
 use defmt::error;
 use embassy_rp::{
-    i2c::{self, Blocking, I2c, SclPin, SdaPin}, peripherals::I2C1, Peri
+    Peri,
+    i2c::{self, Blocking, I2c, SclPin, SdaPin},
+    peripherals::I2C1,
 };
 
 pub const fn required_buf_size(width: usize, height: usize) -> usize {
@@ -14,7 +16,11 @@ pub struct SSD1306<'a, const BUF_SIZE: usize> {
 }
 
 impl<'a, const BUF_SIZE: usize> SSD1306<'a, BUF_SIZE> {
-    pub fn new(i2c1: Peri<'a, I2C1>, p2: Peri<'a, impl SdaPin<I2C1>>, p3: Peri<'a, impl SclPin<I2C1>>) -> Self {
+    pub fn new(
+        i2c1: Peri<'a, I2C1>,
+        p2: Peri<'a, impl SdaPin<I2C1>>,
+        p3: Peri<'a, impl SclPin<I2C1>>,
+    ) -> Self {
         let mut config = i2c::Config::default();
         config.frequency = 800_000;
         Self {

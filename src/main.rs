@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-#![allow(internal_features, static_mut_refs)]
+#![allow(internal_features)]
 #![feature(core_intrinsics)]
 
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -13,7 +13,7 @@ use embassy_futures::join::*;
 
 use embassy_rp::gpio::{Flex, Input, Pull};
 use embassy_rp::i2c::{SclPin, SdaPin};
-use embassy_rp::multicore::{Stack, spawn_core1};
+use embassy_rp::multicore::Stack;
 use embassy_rp::peripherals::{I2C1, PIO0, PIO1, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
@@ -34,6 +34,7 @@ use log::{info, warn};
 
 use rgb::{rgb_runner, rgb_setup};
 
+use usb::usb_init;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
 use defmt_rtt as _;
@@ -52,6 +53,10 @@ mod display;
 use display::SSD1306;
 
 mod rgb;
+
+mod usb;
+
+mod keyboard;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -88,7 +93,9 @@ async fn main(spawner: Spawner) {
     let led = rgb_setup(&mut common, sm0, p.DMA_CH0, p.PIN_0);
     spawner.spawn(rgb_runner(led)).unwrap();
 
-    // Create the driver, from the HAL.
+    let (hid, serial) = usb_init(&spawner, p.USB, Irqs);
+
+    /*// Create the driver, from the HAL.
     let driver = Driver::new(p.USB, Irqs);
 
     // Create embassy-usb Config
@@ -101,29 +108,29 @@ async fn main(spawner: Spawner) {
 
     // Create embassy-usb DeviceBuilder using the driver and config.
     // It needs some buffers for building the descriptors.
-    static mut config_descriptor: [u8; 256] = [0; 256];
-    static mut bos_descriptor: [u8; 256] = [0; 256];
+    let mut config_descriptor: [u8; 256] = [0; 256];
+    let mut bos_descriptor: [u8; 256] = [0; 256];
     // You can also add a Microsoft OS descriptor.
-    static mut msos_descriptor: [u8; 256] = [0; 256];
-    static mut control_buf: [u8; 64] = [0; 64];
+    let mut msos_descriptor: [u8; 256] = [0; 256];
+    let mut control_buf: [u8; 64] = [0; 64];
     let mut request_handler = MyRequestHandler {};
-    static mut device_handler: MyDeviceHandler = MyDeviceHandler::new();
+    let mut device_handler: MyDeviceHandler = MyDeviceHandler::new();
 
     // needs to be made before the builder
-    static mut state: State = State::new();
+    let mut state: State = State::new();
 
-    static mut s_state: embassy_usb::class::cdc_acm::State = embassy_usb::class::cdc_acm::State::new();
+    let mut s_state: embassy_usb::class::cdc_acm::State = embassy_usb::class::cdc_acm::State::new();
 
     let mut builder = Builder::new(
         driver,
         config,
-        unsafe { &mut config_descriptor },
-        unsafe { &mut bos_descriptor },
-        unsafe { &mut msos_descriptor },
-        unsafe { &mut control_buf },
+        &mut config_descriptor,
+        &mut bos_descriptor,
+        &mut msos_descriptor,
+        &mut control_buf,
     );
 
-    builder.handler(unsafe { &mut device_handler } );
+    builder.handler(&mut device_handler);
 
     // Create classes on the builder.
     let config = embassy_usb::class::hid::Config {
@@ -132,33 +139,34 @@ async fn main(spawner: Spawner) {
         poll_ms: 60,
         max_packet_size: 64,
     };
-    let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, unsafe { &mut state }, config);
-    let serial = CdcAcmClass::new(&mut builder, unsafe { &mut s_state }, 64);
-    spawner.spawn(logger(serial)).unwrap();
+    let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut state, config);
+    let serial = CdcAcmClass::new(&mut builder, &mut s_state, 64);
+    //spawner.spawn(logger(serial)).unwrap();
 
     // Build the builder.
     let mut usb = builder.build();
 
     // Run the USB device.
-    let usb_fut = usb.run();
+    let usb_fut = usb.run();*/
 
     let (reader, mut writer) = hid.split();
 
-    let left_right = {
+    let is_left = {
         // left right pin is either connected to ground or to VCC
         // so no pull up or down required
         let left_right_pin = Input::new(p.PIN_28, Pull::None);
 
-        left_right_pin.is_low()
+        left_right_pin.is_high()
     };
 
-    info!("detected: {}", left_right);
+    info!("is_left: {}", is_left);
 
     let vol_counter = AtomicI32::new(0);
 
     // Do stuff with the class!
     let in_fut = async {
         let mut columns = column_pins!(p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21);
+        //let mut columns = column_pins!(p.PIN_21, p.PIN_23, p.PIN_20, p.PIN_22, p.PIN_26, p.PIN_9);
 
         columns.iter_mut().for_each(|x| {
             x.set_low();
@@ -183,15 +191,15 @@ async fn main(spawner: Spawner) {
                 [Key::REBOOT, Key::f(1), Key::f(2),  Key::f(3),  Key::f(4),                    Key::None],
                 [Key::None,   Key::f(5), Key::f(6),  Key::f(7),  Key::f(8),                    Key::None],
                 [Key::None,   Key::f(9), Key::f(10), Key::f(11), Key::f(12),                   Key::None],
-                [Key::None,   Key::None, Key::None,  Key::None,  Key::None,                    Key::None],
-                [Key::None,   Key::None, Key::None,  Key::None,  Key::Special(Special::Lower), Key::None],
+                [Key::None,   Key::None, Key::None,  Key::REBOOT,  Key::REBOOT,                    Key::None],
+                [Key::None,   Key::None, Key::None,  Key::REBOOT,  Key::Special(Special::Lower), Key::None],
             ],
             [ // UPPER
                 [Key::REBOOT, Key::f(1), Key::f(2),  Key::f(3),  Key::f(4),                    Key::None],
                 [Key::None,   Key::f(5), Key::f(6),  Key::f(7),  Key::f(8),                    Key::None],
                 [Key::None,   Key::f(9), Key::f(10), Key::f(11), Key::f(12),                   Key::None],
                 [Key::None,   Key::None, Key::None,  Key::None,  Key::None,                    Key::None],
-                [Key::None,   Key::None, Key::None,  Key::None,  Key::Special(Special::Lower), Key::None],
+                [Key::None,   Key::None, Key::None,  Key::REBOOT,  Key::Special(Special::Lower), Key::None],
             ],
             [ // BOTH
                 [Key::REBOOT, Key::f(1), Key::f(2),  Key::f(3),  Key::f(4),                    Key::None],
@@ -223,21 +231,20 @@ async fn main(spawner: Spawner) {
 
         loop {
             for (x, column) in columns.iter_mut().enumerate() {
-                column.set_as_output();
-                delay(100);
+                core::hint::black_box(column.set_as_output());
+                //delay(100);
                 for (y, row) in rows.iter().enumerate() {
                     let low = row.is_low();
-                    delay(100);
+                    //row.
+                    delay(1000);
                     out[y][x] = low;
                     if low {
                         info!("trigger: {},{}", x, y);
                     }
                 }
-                //column.set_as_input();
-                column.set_as_input();
-                delay(50);
+                core::hint::black_box(column.set_as_input());
+                //delay(100);
             }
-            RGB_STATE.signal(rgb::RgbState::Start);
 
             let mut special = 0;
             if let Some((x, y, ref key)) = specials {
@@ -316,6 +323,7 @@ async fn main(spawner: Spawner) {
     };
 
     let out_fut = async {
+        let mut request_handler = MyRequestHandler {};
         reader.run(true, &mut request_handler).await;
     };
 
@@ -355,13 +363,13 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    ////spawn_core1(
+    //spawn_core1(
     //    p.CORE1,
     //    unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
     //    move || {
     //        display(p.I2C1, p.PIN_2, p.PIN_3);
     //        loop {
-    //            wfi();
+    //            cortex_m::asm::wfi();
     //        }
     //    },
     //);
@@ -369,18 +377,23 @@ async fn main(spawner: Spawner) {
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join3(usb_fut, join(in_fut, out_fut), encoder).await;
+    join3(in_fut, out_fut, encoder).await;
+    //embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
     //embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
 }
 
-#[embassy_executor::task]
-async fn logger(serial: CdcAcmClass<'static, Driver<'static, USB>>) {
-    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
-}
+//#[embassy_executor::task]
+//async fn logger(serial: CdcAcmClass<'static, Driver<'static, USB>>) {
+//    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
+//}
 
 //#[embassy_executor::task]
 /*async*/
-fn display(i2c1: Peri<'static, I2C1>, p2: Peri<'static, impl SdaPin<I2C1>>, p3: Peri<'static, impl SclPin<I2C1>>) {
+fn display(
+    i2c1: Peri<'static, I2C1>,
+    p2: Peri<'static, impl SdaPin<I2C1>>,
+    p3: Peri<'static, impl SclPin<I2C1>>,
+) {
     let mut display: SSD1306<'_, { display::required_buf_size(128, 32) }> =
         SSD1306::new(i2c1, p2, p3);
     display.begin();
