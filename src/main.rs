@@ -3,6 +3,7 @@
 #![allow(internal_features)]
 #![feature(core_intrinsics)]
 
+use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use cortex_m::asm::delay;
@@ -30,6 +31,7 @@ use embassy_usb::{Builder, Config, Handler};
 
 use embassy_usb_logger::ReceiverHandler;
 
+use keyboard::run_keyboard;
 use log::{info, warn};
 
 use rgb::{rgb_runner, rgb_setup};
@@ -80,6 +82,9 @@ static mut CORE1_STACK: Stack<4096> = Stack::new();
 
 static RGB_STATE: Signal<CriticalSectionRawMutex, rgb::RgbState> = Signal::new();
 
+static mut COLUMN_PINS: MaybeUninit<[Flex; 6]> = MaybeUninit::uninit();
+static mut ROW_PINS: MaybeUninit<[Input; 5]> = MaybeUninit::uninit();
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -94,60 +99,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(rgb_runner(led)).unwrap();
 
     let (hid, serial) = usb_init(&spawner, p.USB, Irqs);
-
-    /*// Create the driver, from the HAL.
-    let driver = Driver::new(p.USB, Irqs);
-
-    // Create embassy-usb Config
-    let mut config = Config::new(0xc0de, 0xcafe);
-    config.manufacturer = Some("Me.");
-    config.product = Some("most definitely a keyboard");
-    config.serial_number = Some("12345678");
-    config.max_power = 100;
-    config.max_packet_size_0 = 64;
-
-    // Create embassy-usb DeviceBuilder using the driver and config.
-    // It needs some buffers for building the descriptors.
-    let mut config_descriptor: [u8; 256] = [0; 256];
-    let mut bos_descriptor: [u8; 256] = [0; 256];
-    // You can also add a Microsoft OS descriptor.
-    let mut msos_descriptor: [u8; 256] = [0; 256];
-    let mut control_buf: [u8; 64] = [0; 64];
-    let mut request_handler = MyRequestHandler {};
-    let mut device_handler: MyDeviceHandler = MyDeviceHandler::new();
-
-    // needs to be made before the builder
-    let mut state: State = State::new();
-
-    let mut s_state: embassy_usb::class::cdc_acm::State = embassy_usb::class::cdc_acm::State::new();
-
-    let mut builder = Builder::new(
-        driver,
-        config,
-        &mut config_descriptor,
-        &mut bos_descriptor,
-        &mut msos_descriptor,
-        &mut control_buf,
-    );
-
-    builder.handler(&mut device_handler);
-
-    // Create classes on the builder.
-    let config = embassy_usb::class::hid::Config {
-        report_descriptor: KeyboardReport::desc(),
-        request_handler: None,
-        poll_ms: 60,
-        max_packet_size: 64,
-    };
-    let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut state, config);
-    let serial = CdcAcmClass::new(&mut builder, &mut s_state, 64);
-    //spawner.spawn(logger(serial)).unwrap();
-
-    // Build the builder.
-    let mut usb = builder.build();
-
-    // Run the USB device.
-    let usb_fut = usb.run();*/
 
     let (reader, mut writer) = hid.split();
 
@@ -164,7 +115,7 @@ async fn main(spawner: Spawner) {
     let vol_counter = AtomicI32::new(0);
 
     // Do stuff with the class!
-    let in_fut = async {
+    /*let in_fut = async {
         let mut columns = column_pins!(p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21);
         //let mut columns = column_pins!(p.PIN_21, p.PIN_23, p.PIN_20, p.PIN_22, p.PIN_26, p.PIN_9);
 
@@ -320,7 +271,7 @@ async fn main(spawner: Spawner) {
 
             embassy_futures::yield_now().await;
         }
-    };
+    };*/
 
     let out_fut = async {
         let mut request_handler = MyRequestHandler {};
@@ -363,6 +314,18 @@ async fn main(spawner: Spawner) {
         }
     };
 
+    unsafe {
+        COLUMN_PINS = MaybeUninit::new(column_pins!(
+            p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21
+        ))
+    }
+    unsafe { ROW_PINS = MaybeUninit::new(row_pins!(p.PIN_29, p.PIN_27, p.PIN_6, p.PIN_7, p.PIN_8)) }
+    #[allow(static_mut_refs)]
+    spawner.must_spawn(run_keyboard(
+        unsafe { COLUMN_PINS.assume_init_ref() },
+        unsafe { ROW_PINS.assume_init_ref() },
+    ));
+
     //spawn_core1(
     //    p.CORE1,
     //    unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
@@ -377,7 +340,7 @@ async fn main(spawner: Spawner) {
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join3(in_fut, out_fut, encoder).await;
+    join(/*in_fut, */ out_fut, encoder).await;
     //embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
     //embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
 }
@@ -487,6 +450,17 @@ macro_rules! column_pins {
 
         out
     }};
+}
+
+#[macro_export]
+macro_rules! column_pins_static {
+    ( $name:tt, $($x:expr), *) => {
+        static $name: [Flex; count!($($x)*)] = [$(Flex::new($x)),*];
+        //const SIZE: usize = count!($($x)*);
+        //let out: [Flex; SIZE] = [$(Flex::new($x)),*];
+
+        //out
+    };
 }
 
 #[macro_export]

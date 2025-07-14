@@ -23,19 +23,32 @@ const USB_CONFIG: Config = {
     config
 };
 
+#[allow(non_upper_case_globals)]
 static mut config_descriptor: [u8; 256] = [0; 256];
+#[allow(non_upper_case_globals)]
 static mut bos_descriptor: [u8; 256] = [0; 256];
+#[allow(non_upper_case_globals)]
 static mut msos_descriptor: [u8; 256] = [0; 256];
 // need to be atleast the size of the biggest expected packet
 // i'm making it bigger just to be sure
+#[allow(non_upper_case_globals)]
 static mut control_buf: [u8; 256] = [0; 256];
 //static mut request_handler: MyRequestHandler = MyRequestHandler {};
+#[allow(non_upper_case_globals)]
 static mut device_handler: MyDeviceHandler = MyDeviceHandler::new();
+#[allow(non_upper_case_globals)]
 static mut hid_state: hid::State = hid::State::new();
+#[allow(non_upper_case_globals)]
 static mut s_state: cdc_acm::State = cdc_acm::State::new();
 
-pub fn usb_init(spawner: &Spawner, usb: Peri<'static, USB>, irq: Irqs) -> (
-    HidReaderWriter<'static, Driver<'static, USB>, 1, 8>, CdcAcmClass<'static, Driver<'static, USB>>) {
+pub fn usb_init(
+    spawner: &Spawner,
+    usb: Peri<'static, USB>,
+    irq: Irqs,
+) -> (
+    HidReaderWriter<'static, Driver<'static, USB>, 1, 8>,
+    CdcAcmClass<'static, Driver<'static, USB>>,
+) {
     let driver: Driver<'static, USB> = Driver::new(usb, irq);
 
     #[allow(static_mut_refs)]
