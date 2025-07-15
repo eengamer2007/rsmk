@@ -1,20 +1,38 @@
-use embassy_rp::gpio::{Flex, Input};
-use log::warn;
+use core::sync::atomic::{AtomicI32, Ordering};
+
+use cortex_m::asm::delay;
+use embassy_rp::{
+    gpio::{Flex, Input},
+    peripherals::USB,
+    usb::Driver,
+};
+use embassy_usb::{
+    class::hid::{HidReader, HidWriter, ReportId, RequestHandler},
+    control::OutResponse,
+};
+use log::{info, warn};
+use usbd_hid::descriptor::KeyboardReport;
+
+use crate::{RGB_STATE, reboot};
+
+#[embassy_executor::task]
+pub async fn run_reader(reader: HidReader<'static, Driver<'static, USB>, 1>) {
+    let mut request_handler = MyRequestHandler {};
+    reader.run(true, &mut request_handler).await;
+}
 
 #[embassy_executor::task]
 pub async fn run_keyboard(
-    column_pins: &'static [Flex<'static>],
-    row_pins: &'static [Input<'static>],
+    columns: &'static mut [Flex<'static>],
+    rows: &'static mut [Input<'static>],
+    mut writer: HidWriter<'static, Driver<'static, USB>, 8>,
+    vol_counter: &'static AtomicI32,
 ) {
-    let mut columns = column_pins!(p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21);
-    //let mut columns = column_pins!(p.PIN_21, p.PIN_23, p.PIN_20, p.PIN_22, p.PIN_26, p.PIN_9);
-
     columns.iter_mut().for_each(|x| {
         x.set_low();
         x.set_as_input();
     });
 
-    let mut rows = row_pins!(p.PIN_29, p.PIN_27, p.PIN_6, p.PIN_7, p.PIN_8);
     rows.iter_mut().for_each(|r| r.set_schmitt(true));
 
     let mut out = [[false; 6]; 5];
@@ -69,6 +87,8 @@ pub async fn run_keyboard(
     info!("{:?}", specials);
 
     let mut old_report = KeyboardReport::default();
+
+    RGB_STATE.signal(crate::rgb::RgbState::Start);
 
     loop {
         for (x, column) in columns.iter_mut().enumerate() {
@@ -163,7 +183,6 @@ pub async fn run_keyboard(
     }
 }
 
-
 #[allow(dead_code)]
 #[derive(Clone)]
 enum Key {
@@ -196,16 +215,18 @@ impl Key {
         let num = c as u8;
 
         if num >= b'a' && num <= b'z' {
+            // first maps a..z to 0..26 and then adds 4 because a is character 4 in the keycode map
             return Self::Key((num - b'a') + 4);
         }
 
         // ascii starts with 0
-        // but keycodes have 0 at the end
+        // but keycodes have 0 at the end (of the number range)
         if c == '0' {
             return Self::Key(39);
         }
 
         if num >= b'1' && num <= b'9' {
+            // map in the same way as a..z
             return Self::Key((num - b'1') + 30);
         }
 
@@ -233,4 +254,27 @@ enum Special {
     Lower,
     Upper,
     Reboot,
+}
+
+struct MyRequestHandler {}
+
+impl RequestHandler for MyRequestHandler {
+    fn get_report(&mut self, id: ReportId, _buf: &mut [u8]) -> Option<usize> {
+        info!("Get report for {:?}", id);
+        None
+    }
+
+    fn set_report(&mut self, id: ReportId, data: &[u8]) -> OutResponse {
+        info!("Set report for {:?}: {:?}", id, data);
+        OutResponse::Accepted
+    }
+
+    fn set_idle_ms(&mut self, id: Option<ReportId>, dur: u32) {
+        info!("Set idle rate for {:?} to {:?}", id, dur);
+    }
+
+    fn get_idle_ms(&mut self, id: Option<ReportId>) -> Option<u32> {
+        info!("Get idle rate for {:?}", id);
+        None
+    }
 }

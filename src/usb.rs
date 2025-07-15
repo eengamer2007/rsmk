@@ -1,15 +1,18 @@
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_executor::Spawner;
 use embassy_rp::{Peri, peripherals::USB, usb::Driver};
 use embassy_usb::{
-    Builder, Config, UsbDevice,
+    Builder, Config, Handler, UsbDevice,
     class::{
         cdc_acm::{self, CdcAcmClass},
         hid::{self, HidReaderWriter},
     },
 };
+use log::info;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
-use crate::{Irqs, MyDeviceHandler, MyRequestHandler};
+use crate::Irqs;
 
 const USB_CONFIG: Config = {
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -87,4 +90,48 @@ pub fn usb_init(
 #[embassy_executor::task]
 async fn usb_runner(mut usb: UsbDevice<'static, Driver<'static, USB>>) {
     usb.run().await;
+}
+
+struct MyDeviceHandler {
+    configured: AtomicBool,
+}
+
+impl MyDeviceHandler {
+    const fn new() -> Self {
+        MyDeviceHandler {
+            configured: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Handler for MyDeviceHandler {
+    fn enabled(&mut self, enabled: bool) {
+        self.configured.store(false, Ordering::Relaxed);
+        if enabled {
+            info!("Device enabled");
+        } else {
+            info!("Device disabled");
+        }
+    }
+
+    fn reset(&mut self) {
+        self.configured.store(false, Ordering::Relaxed);
+        info!("Bus reset, the Vbus current limit is 100mA");
+    }
+
+    fn addressed(&mut self, addr: u8) {
+        self.configured.store(false, Ordering::Relaxed);
+        info!("USB address set to: {}", addr);
+    }
+
+    fn configured(&mut self, configured: bool) {
+        self.configured.store(configured, Ordering::Relaxed);
+        if configured {
+            info!(
+                "Device configured, it may now draw up to the configured current limit from Vbus."
+            )
+        } else {
+            info!("Device is no longer configured, the Vbus current limit is 100mA.");
+        }
+    }
 }

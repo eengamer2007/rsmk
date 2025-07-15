@@ -2,7 +2,7 @@ use embassy_rp::{
     Peri,
     dma::Channel,
     peripherals::PIO1,
-    pio::{Common, PioPin, StateMachine},
+    pio::{Common, Instance, PioPin, StateMachine},
     pio_programs::ws2812::{PioWs2812, PioWs2812Program},
 };
 use embassy_time::{Instant, Timer};
@@ -15,14 +15,14 @@ pub enum RgbState {
     Start,
 }
 
-pub fn rgb_setup<'a>(
-    pio: &mut Common<'a, PIO1>,
-    sm: StateMachine<'a, PIO1, 0>,
+pub fn rgb_setup<'a, const SM: usize, PIO: Instance>(
+    pio: &mut Common<'a, PIO>,
+    sm: StateMachine<'a, PIO, SM>,
     dma: Peri<'a, impl Channel>,
     pin: Peri<'a, impl PioPin>,
-) -> PioWs2812<'a, PIO1, 0, LED_COUNT> {
+) -> PioWs2812<'a, PIO, SM, LED_COUNT> {
     let prg = PioWs2812Program::new(pio);
-    let led: PioWs2812<'_, PIO1, 0, LED_COUNT> = PioWs2812::new(pio, sm, dma, pin, &prg);
+    let led: PioWs2812<'_, PIO, SM, LED_COUNT> = PioWs2812::new(pio, sm, dma, pin, &prg);
     led
 }
 
