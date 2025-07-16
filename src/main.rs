@@ -53,6 +53,8 @@ mod keyboard;
 
 mod encoder;
 
+mod panic;
+
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
 });
@@ -81,20 +83,17 @@ static mut ROW_PINS: MaybeUninit<[Input; 5]> = MaybeUninit::uninit();
 
 static VOL_COUNTER: AtomicI32 = AtomicI32::new(0);
 
-#[panic_handler]
-fn panic_handler(_: &core::panic::PanicInfo) -> ! {
-    bootrom::reboot(
-        0x0002, /* reboot to bootsel*/
-        1,      /* 1 ms delay */
-        0,      /* don't indicate a gpio because we don't use em */
-        0,      /* don't disable anything or mess with LED's */
-    );
-    loop {}
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    let is_left = {
+        // left right pin is either connected to ground or to VCC
+        // so no pull up or down required
+        let left_right_pin = Input::new(p.PIN_28, Pull::None);
+
+        left_right_pin.is_high()
+    };
 
     let Pio {
         mut common, sm0, ..
@@ -108,14 +107,6 @@ async fn main(spawner: Spawner) {
     let (hid, serial) = usb_init(&spawner, p.USB, Irqs);
 
     let (reader, writer) = hid.split();
-
-    let is_left = {
-        // left right pin is either connected to ground or to VCC
-        // so no pull up or down required
-        let left_right_pin = Input::new(p.PIN_28, Pull::None);
-
-        left_right_pin.is_high()
-    };
 
     info!("is_left: {}", is_left);
 
@@ -141,15 +132,14 @@ async fn main(spawner: Spawner) {
     let enc = encoder_setup(&mut common, sm0, p.PIN_4, p.PIN_5);
 
     spawner.spawn(run_encoder(&VOL_COUNTER, enc)).unwrap();
-    //let _ = spawner.spawn(display_task(p.I2C1, p.PIN_2, p.PIN_3));
 
     spawn_core1(
         p.CORE1,
         unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
         move || {
-            let executor = CORE1_EXECUTOR.init(Executor::new());
-            executor.run(|spawner| {
-                let _ = spawner.spawn(display_task(p.I2C1, p.PIN_2, p.PIN_3));//.inspect_err(|e| info!("display task failed to start: {}", e) );
+            let exec = CORE1_EXECUTOR.init(Executor::new());
+            exec.run(|spawner| {
+                let _ = spawner.spawn(display_task(p.I2C1, p.PIN_2, p.PIN_3));
             });
         },
     );
@@ -165,19 +155,57 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn display_task(i2c1: Peri<'static, I2C1>, p2: Peri<'static, PIN_2>, p3: Peri<'static, PIN_3>) {
-    let _ = display(i2c1, p2, p3).await;//.inspect_err(|e| info!("display code failed because: {:?}", e));
+    let _ = display(i2c1, p2, p3).await.inspect_err(|e| info!("display errored with: {:?}",e ));
 }
 
-//#[embassy_executor::task]
 async fn display(
     i2c1: Peri<'static, I2C1>,
     p2: Peri<'static, impl SdaPin<I2C1>>,
     p3: Peri<'static, impl SclPin<I2C1>>,
 ) -> Result<(), embassy_rp::i2c::Error> {
-    let mut display: SSD1306<'_, { display::required_buf_size(128, 32) }, I2C1> =
+    #[allow(non_upper_case_globals)]
+    const i: bool = true;
+    const O: bool = false;
+    // https://www.reddit.com/r/rust/comments/pw54rx/media_heres_a_crate_i_just_made_for_converting/
+    const FERRIS: [[bool; 32]; 24] = [
+        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,i,i,i,i,i,i,O,i,O,O,i,O,i,i,i,i,i,i,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,],
+        [i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,],
+        [i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,],
+        [i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,],
+        [i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,],
+        [i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,],
+        [i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,],
+        [i,i,O,O,O,O,O,O,O,O,O,O,i,i,i,O,O,i,i,i,O,O,O,O,O,O,O,O,O,O,i,i,],
+        [i,i,O,O,O,O,O,O,O,O,O,O,i,i,i,O,O,i,i,i,O,O,O,O,O,O,O,O,O,O,i,i,],
+        [i,O,O,O,O,O,O,O,O,O,O,O,i,i,i,O,O,i,i,i,O,O,O,O,O,O,O,O,O,O,O,i,],
+        [i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,],
+        [i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,],
+        [i,i,i,O,O,i,i,i,O,O,O,O,i,i,i,i,i,i,i,i,O,O,O,O,i,i,i,O,O,i,i,i,],
+        [i,i,i,i,O,O,i,i,i,O,O,O,i,i,i,i,i,i,i,i,O,O,O,i,i,i,O,O,i,i,i,i,],
+        [i,i,i,i,i,O,i,i,i,i,O,O,O,O,O,i,i,O,O,O,O,O,i,i,i,i,O,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,i,i,i,i,O,O,O,O,i,i,O,O,O,O,i,i,i,i,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
+        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
+    ];
+
+    let mut display: SSD1306::<'_, 128, 32, { display::required_buf_size(128, 32) }, I2C1> =
         SSD1306::new(i2c1, p2, p3);
     display.begin()?;
-    display.test().await;
+    display.hline(128-5);
+    display.display()?;
+    display.line((0,0), (31,127));
+    display.line((31,0), (0,127));
+    display.display()?;
+    display.load_bitmap(0, 128-24, FERRIS);
+    display.display()?;
+
+    //display.test().await?;
     //display.display();
     //for x in 0..32 {
     //    //for y in 0..4 {
@@ -234,7 +262,7 @@ impl ReceiverHandler for UsbReceiver {
     }
 
     async fn handle_data(&self, data: &[u8]) -> () {
-        //info!("recevived: {:?}", data);
+        info!("recevived: {:?}", data);
         if data.contains(&98) {
             reboot().await;
         }
