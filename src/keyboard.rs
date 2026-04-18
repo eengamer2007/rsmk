@@ -69,6 +69,7 @@ pub async fn run_keyboard(
             ]
         ];
 
+    // creating a list of special keys that need to be checked before the rest of all the keyS
     let specials: Option<(usize, usize, Special)> = keymap[0]
         .iter()
         .enumerate()

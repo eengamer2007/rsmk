@@ -26,8 +26,7 @@ const USB_CONFIG: Config = {
     config
 };
 
-#[allow(non_upper_case_globals)]
-static mut config_descriptor: [u8; 256] = [0; 256];
+static mut CONFIG_DESC: [u8; 256] = [0; 256];
 #[allow(non_upper_case_globals)]
 static mut bos_descriptor: [u8; 256] = [0; 256];
 #[allow(non_upper_case_globals)]
@@ -36,7 +35,6 @@ static mut msos_descriptor: [u8; 256] = [0; 256];
 // i'm making it bigger just to be sure
 #[allow(non_upper_case_globals)]
 static mut control_buf: [u8; 256] = [0; 256];
-//static mut request_handler: MyRequestHandler = MyRequestHandler {};
 #[allow(non_upper_case_globals)]
 static mut device_handler: MyDeviceHandler = MyDeviceHandler::new();
 #[allow(non_upper_case_globals)]
@@ -60,7 +58,7 @@ pub fn usb_init(
         USB_CONFIG,
         #[allow(static_mut_refs)]
         unsafe {
-            &mut config_descriptor
+            &mut CONFIG_DESC
         },
         unsafe { &mut bos_descriptor },
         unsafe { &mut msos_descriptor },

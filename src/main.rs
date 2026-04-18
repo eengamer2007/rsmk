@@ -9,16 +9,17 @@ use core::sync::atomic::AtomicI32;
 use embassy_executor::{Executor, Spawner};
 
 use embassy_futures::yield_now;
-use embassy_rp::gpio::{Flex, Input, Pull};
-use embassy_rp::i2c::{SclPin, SdaPin};
+use embassy_rp::bind_interrupts;
+use embassy_rp::gpio::{Drive, Flex, Input, Pull};
 use embassy_rp::multicore::{Stack, spawn_core1};
-use embassy_rp::peripherals::{I2C1, PIN_2, PIN_3, PIO0, PIO1, USB};
+use embassy_rp::peripherals::{I2C1, PIO0, PIO1, USB};
 use embassy_rp::pio::Pio;
-use embassy_rp::{Peri, bind_interrupts};
 
+use embassy_rp::usb::Driver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
+use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb_logger::ReceiverHandler;
 
 use encoder::{encoder_setup, run_encoder};
@@ -32,6 +33,8 @@ use usb::usb_init;
 
 use defmt_rtt as _;
 
+use crate::dbg_led::DbgLed;
+
 //use panic_probe as _;
 
 #[allow(
@@ -43,7 +46,8 @@ use defmt_rtt as _;
 mod bootrom;
 
 mod display;
-use display::SSD1306;
+
+mod display_task;
 
 mod rgb;
 
@@ -54,6 +58,8 @@ mod keyboard;
 mod encoder;
 
 mod panic;
+
+mod dbg_led;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
@@ -87,6 +93,9 @@ static VOL_COUNTER: AtomicI32 = AtomicI32::new(0);
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
+    unsafe { DbgLed::init(); }
+    
+
     let is_left = {
         // left right pin is either connected to ground or to VCC
         // so no pull up or down required
@@ -110,111 +119,73 @@ async fn main(spawner: Spawner) {
 
     info!("is_left: {}", is_left);
 
-    unsafe {
-        COLUMN_PINS = MaybeUninit::new(column_pins!(
-            p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21
-        ))
-    }
-    unsafe { ROW_PINS = MaybeUninit::new(row_pins!(p.PIN_29, p.PIN_27, p.PIN_6, p.PIN_7, p.PIN_8)) }
-    #[allow(static_mut_refs)]
-    spawner.must_spawn(run_keyboard(
-        unsafe { COLUMN_PINS.assume_init_mut() },
-        unsafe { ROW_PINS.assume_init_mut() },
-        writer,
-        &VOL_COUNTER,
-    ));
-    spawner.spawn(run_reader(reader)).unwrap();
+    //let enc;
 
-    let Pio {
-        mut common, sm0, ..
-    } = Pio::new(p.PIO0, Pio0Irqs);
+    //let Pio {
+    //    mut common, sm0, ..
+    //} = Pio::new(p.PIO0, Pio0Irqs);
 
-    let enc = encoder_setup(&mut common, sm0, p.PIN_4, p.PIN_5);
+    /*if is_left {
+        unsafe {
+            COLUMN_PINS = MaybeUninit::new(column_pins!(
+                p.PIN_9, p.PIN_26, p.PIN_22, p.PIN_20, p.PIN_23, p.PIN_21
+            ));
+            ROW_PINS = MaybeUninit::new(row_pins!(p.PIN_29, p.PIN_27, p.PIN_6, p.PIN_7, p.PIN_8))
+        }
 
-    spawner.spawn(run_encoder(&VOL_COUNTER, enc)).unwrap();
+        // need to init this here for the borrow checker
+        enc = encoder_setup(&mut common, sm0, p.PIN_5, p.PIN_4);
+    } else {
+        unsafe {
+            COLUMN_PINS = MaybeUninit::new(column_pins!(
+                p.PIN_22, p.PIN_5, p.PIN_6, p.PIN_7, p.PIN_8, p.PIN_9
+            ));
+            ROW_PINS = MaybeUninit::new(row_pins!(p.PIN_29, p.PIN_4, p.PIN_20, p.PIN_23, p.PIN_21));
+        }
 
-    spawn_core1(
-        p.CORE1,
-        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
-        move || {
-            let exec = CORE1_EXECUTOR.init(Executor::new());
-            exec.run(|spawner| {
-                let _ = spawner.spawn(display_task(p.I2C1, p.PIN_2, p.PIN_3));
-            });
-        },
-    );
+        enc = encoder_setup(&mut common, sm0, p.PIN_26, p.PIN_27);
+    }*/
+
+    //#[allow(static_mut_refs)]
+    //spawner.must_spawn(run_keyboard(
+    //    unsafe { COLUMN_PINS.assume_init_mut() },
+    //    unsafe { ROW_PINS.assume_init_mut() },
+    //    writer,
+    //    &VOL_COUNTER,
+    //));
+    //spawner.spawn(run_reader(reader)).unwrap();
+
+    //let enc = if is_left {
+    //    encoder_setup(&mut common, sm0, p.PIN_4, p.PIN_5)
+    //} else {
+    //    todo!()
+    //};
+
+    //spawner.spawn(run_encoder(&VOL_COUNTER, enc)).unwrap();
+
+    //spawn_core1(
+    //    p.CORE1,
+    //    unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+    //    move || {
+    //        let exec = CORE1_EXECUTOR.init(Executor::new());
+    //        exec.run(|spawner| {
+    //            if is_left {
+    //                let _ = spawner.spawn(display_task::display_task(p.I2C1, p.PIN_2, p.PIN_3));
+    //            } else {
+    //            }
+    //        });
+    //    },
+    //);
     //spawner.spawn(display(p.I2C1, p.PIN_2, p.PIN_3)).unwrap();
 
-    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
+    //spawner.spawn(embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver));
+    let _ = spawner.spawn(logger(serial));
+    loop{}
 }
-
-//#[embassy_executor::task]
-//async fn logger(serial: CdcAcmClass<'static, Driver<'static, USB>>) {
-//    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
-//}
 
 #[embassy_executor::task]
-async fn display_task(i2c1: Peri<'static, I2C1>, p2: Peri<'static, PIN_2>, p3: Peri<'static, PIN_3>) {
-    let _ = display(i2c1, p2, p3).await.inspect_err(|e| info!("display errored with: {:?}",e ));
-}
-
-async fn display(
-    i2c1: Peri<'static, I2C1>,
-    p2: Peri<'static, impl SdaPin<I2C1>>,
-    p3: Peri<'static, impl SclPin<I2C1>>,
-) -> Result<(), embassy_rp::i2c::Error> {
-    #[allow(non_upper_case_globals)]
-    const i: bool = true;
-    const O: bool = false;
-    // https://www.reddit.com/r/rust/comments/pw54rx/media_heres_a_crate_i_just_made_for_converting/
-    const FERRIS: [[bool; 32]; 24] = [
-        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,i,i,i,i,i,i,O,i,O,O,i,O,i,i,i,i,i,i,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,i,],
-        [i,i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,i,],
-        [i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,],
-        [i,i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,i,],
-        [i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,],
-        [i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,],
-        [i,i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,i,],
-        [i,i,O,O,O,O,O,O,O,O,O,O,i,i,i,O,O,i,i,i,O,O,O,O,O,O,O,O,O,O,i,i,],
-        [i,i,O,O,O,O,O,O,O,O,O,O,i,i,i,O,O,i,i,i,O,O,O,O,O,O,O,O,O,O,i,i,],
-        [i,O,O,O,O,O,O,O,O,O,O,O,i,i,i,O,O,i,i,i,O,O,O,O,O,O,O,O,O,O,O,i,],
-        [i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,],
-        [i,i,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,i,i,],
-        [i,i,i,O,O,i,i,i,O,O,O,O,i,i,i,i,i,i,i,i,O,O,O,O,i,i,i,O,O,i,i,i,],
-        [i,i,i,i,O,O,i,i,i,O,O,O,i,i,i,i,i,i,i,i,O,O,O,i,i,i,O,O,i,i,i,i,],
-        [i,i,i,i,i,O,i,i,i,i,O,O,O,O,O,i,i,O,O,O,O,O,i,i,i,i,O,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,i,i,i,i,O,O,O,O,i,i,O,O,O,O,i,i,i,i,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
-        [i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,],
-    ];
-
-    let mut display: SSD1306::<'_, 128, 32, { display::required_buf_size(128, 32) }, I2C1> =
-        SSD1306::new(i2c1, p2, p3);
-    display.begin()?;
-    display.hline(128-5);
-    display.display()?;
-    display.line((0,0), (31,127));
-    display.line((31,0), (0,127));
-    display.display()?;
-    display.load_bitmap(0, 128-24, FERRIS);
-    display.display()?;
-
-    //display.test().await?;
-    //display.display();
-    //for x in 0..32 {
-    //    //for y in 0..4 {
-    //        display.toggle_pixel(x, x);
-    //    //}
-    //    display.display();
-    //}
-    //display.display();
-    Ok(())
+async fn logger(serial: CdcAcmClass<'static, Driver<'static, USB>>) {
+    embassy_usb_logger::with_class!(1024, log::LevelFilter::Trace, serial, UsbReceiver).await;
 }
 
 #[macro_export]
@@ -240,7 +211,21 @@ macro_rules! column_pins_static {
 
 #[macro_export]
 macro_rules! row_pins {
-    ($($x:expr), *) => {{
+    ($($x:expr), *) => {{recevived: [68]
+
+recevived: [101]
+
+recevived: [118]
+
+recevived: [105]
+
+recevived: [99]
+
+recevived: [101]
+
+recevived: [32]
+
+recevived: [101]
         const SIZE: usize = count!($($x)*);
         let out: [Input; SIZE] = [$(Input::new($x, Pull::Up)),*];
 
@@ -270,8 +255,8 @@ impl ReceiverHandler for UsbReceiver {
 }
 
 async fn reboot() {
-    RGB_STATE.signal(rgb::RgbState::Reset);
-    yield_now().await;
+    //RGB_STATE.signal(rgb::RgbState::Reset);
+    //yield_now().await;
     info!("rebooting");
     info!(
         "returned: {}",
@@ -282,4 +267,5 @@ async fn reboot() {
             0       /* don't disable anything or mess with LED's */
         )
     );
+    loop {}
 }

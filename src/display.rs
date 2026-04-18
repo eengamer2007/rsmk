@@ -31,11 +31,7 @@ impl<'a, const WIDTH: usize, const HEIGHT: usize, const BUF_SIZE: usize, I2C: In
         p2: Peri<'a, impl SdaPin<I2C>>,
         p3: Peri<'a, impl SclPin<I2C>>,
     ) -> Self {
-        debug_assert_eq!(
-            BUF_SIZE,
-            (WIDTH /  8) * HEIGHT,
-            "wrong buffer size given"
-        );
+        debug_assert_eq!(BUF_SIZE, (WIDTH / 8) * HEIGHT, "wrong buffer size given");
         let mut config = i2c::Config::default();
         config.frequency = 400_000;
         Self {
@@ -247,21 +243,34 @@ impl<'a, const WIDTH: usize, const HEIGHT: usize, const BUF_SIZE: usize, I2C: In
         self.buffer[y + (x / 8) * WIDTH] ^= 1 << (x & 7);
     }
 
-    pub fn vline(&mut self, x: usize) {
+    pub fn vline(&mut self, x: usize, on: bool) {
         for y in 0..WIDTH {
-            self.set_pixel(x, y);
+            if on {
+                self.set_pixel(x, y);
+            } else {
+                self.clear_pixel(x, y);
+            }
         }
     }
 
-    pub fn hline(&mut self, y: usize) {
+    pub fn hline(&mut self, y: usize, on: bool) {
         for x in 0..HEIGHT {
-            self.set_pixel(x, y);
+            if on {
+                self.set_pixel(x, y);
+            } else {
+                self.clear_pixel(x, y);
+            }
         }
     }
 
-    pub fn load_bitmap<const SIZE_X: usize, const SIZE_Y: usize>(&mut self, x: usize, y: usize, bitmap: [[bool; SIZE_X]; SIZE_Y]) {
-        for (i, x) in (x..(x+SIZE_X)).enumerate() {
-            for (j, y) in (y..(y+SIZE_Y)).rev().enumerate() {
+    pub fn load_bitmap<const SIZE_X: usize, const SIZE_Y: usize>(
+        &mut self,
+        x: usize,
+        y: usize,
+        bitmap: [[bool; SIZE_X]; SIZE_Y],
+    ) {
+        for (i, x) in (x..(x + SIZE_X)).enumerate() {
+            for (j, y) in (y..(y + SIZE_Y)).rev().enumerate() {
                 if bitmap[j][i] {
                     self.set_pixel(x, y);
                 } else {
